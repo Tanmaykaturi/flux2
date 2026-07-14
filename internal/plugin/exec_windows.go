@@ -19,19 +19,110 @@ limitations under the License.
 package plugin
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 )
+
+// allowedEnvPrefixes is the explicit set of environment variable prefixes
+// forwarded to the plugin. This intentionally excludes variables that could
+// be used to hijack process behaviour (e.g. ComSpec, PATHEXT, TEMP/TMP
+// substitution attacks).
+var allowedEnvPrefixes = []string{
+	"HOME=",
+	"USER=",
+	"LOGNAME=",
+	"PATH=",
+	"TERM=",
+	"LANG=",
+	"LC_",
+	"XDG_",
+	"KUBECONFIG=",
+	"FLUX_",
+	"NO_COLOR=",
+	"HTTPS_PROXY=",
+	"HTTP_PROXY=",
+	"NO_PROXY=",
+	"https_proxy=",
+	"http_proxy=",
+	"no_proxy=",
+	// Windows-specific variables required for normal process operation.
+	"USERPROFILE=",
+	"APPDATA=",
+	"LOCALAPPDATA=",
+	"SYSTEMROOT=",
+	"WINDIR=",
+	"PROGRAMFILES=",
+	"PROGRAMFILES(X86)=",
+}
+
+// filteredEnv returns a copy of os.Environ containing only variables whose
+// names match allowedEnvPrefixes, preventing environment-variable-based
+// injection attacks.
+func filteredEnv() []string {
+	raw := os.Environ()
+	filtered := make([]string, 0, len(raw))
+	for _, kv := range raw {
+		upper := strings.ToUpper(kv)
+		for _, prefix := range allowedEnvPrefixes {
+			if strings.HasPrefix(upper, strings.ToUpper(prefix)) {
+				filtered = append(filtered, kv)
+				break
+			}
+		}
+	}
+	return filtered
+}
 
 // Exec runs the plugin as a child process with full I/O passthrough.
 // Matches kubectl's Windows fallback pattern.
 func Exec(path string, args []string) error {
-	cmd := exec.Command(path, args...)
+	// Resolve to an absolute, lexically clean path to prevent path traversal
+	// (e.g. directory entries containing "..") from reaching exec.Command.
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("plugin exec: resolving path %q: %w", path, err)
+	}
+	absPath = filepath.Clean(absPath)
+
+	// Restrict execution to the directory that holds the current binary so
+	// that only co-located, trusted plugin binaries can be executed.
+	selfPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("plugin exec: resolving current executable: %w", err)
+	}
+	pluginDir := filepath.Dir(filepath.Clean(selfPath))
+	if !strings.HasPrefix(absPath, pluginDir+string(filepath.Separator)) {
+		return fmt.Errorf("plugin exec: %q is outside the allowed plugin directory %q", absPath, pluginDir)
+	}
+
+	// Confirm the resolved target is a regular file before executing it.
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return fmt.Errorf("plugin exec: stat %q: %w", absPath, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("plugin exec: %q is not a regular file", absPath)
+	}
+
+	// Validate every argument: null bytes terminate C strings and can be used
+	// to smuggle unexpected content past Go-level checks.
+	for i, arg := range args {
+		if strings.ContainsRune(arg, '\x00') {
+			return fmt.Errorf("plugin exec: argument %d contains a null byte", i)
+		}
+	}
+
+	// #nosec G204 -- path is validated above: canonicalized, confined to the
+	// plugin directory, and confirmed to be a regular file.
+	cmd := exec.Command(absPath, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
-	err := cmd.Run()
+	cmd.Env = filteredEnv()
+	err = cmd.Run()
 	if err == nil {
 		os.Exit(0)
 	}
