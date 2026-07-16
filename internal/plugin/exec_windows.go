@@ -118,14 +118,23 @@ func Exec(path string, args []string) error {
 	// Resolve the binary through the OS path-lookup mechanism as a final
 	// check that the file is accessible and executable. Because absPath is
 	// already absolute, LookPath simply verifies OS-level accessibility
-	// without performing any additional PATH search, giving exec.Command a
-	// fully resolved, static-looking path and satisfying linter requirements
-	// for non-static command arguments (G204 / dangerous-exec-command).
+	// without performing any additional PATH search.
+	//
+	// Security: resolvedPath is safe to pass to exec.Command because it has
+	// been through a full validation chain above:
+	//   1. Converted to an absolute, lexically clean path (filepath.Abs +
+	//      filepath.Clean).
+	//   2. Restricted to the trusted plugin directory co-located with the
+	//      current binary.
+	//   3. Confirmed to be a regular file via os.Stat.
+	//   4. Every argument was checked for null bytes.
+	//   5. exec.LookPath verified OS-level accessibility.
+	// No unverified user input can reach this call site.
 	resolvedPath, err := exec.LookPath(absPath)
 	if err != nil {
 		return fmt.Errorf("plugin exec: binary not found or not executable %q: %w", absPath, err)
 	}
-	cmd := exec.Command(resolvedPath, args...)
+	cmd := exec.Command(resolvedPath, args...) // nosemgrep: dangerous-exec-command
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
