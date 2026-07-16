@@ -21,7 +21,7 @@ import (
 	"bytes"
 	"io"
 	"os"
-	"text/template"
+	"html/template"
 )
 
 var kustomizationTmpl = `---
