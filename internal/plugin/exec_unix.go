@@ -96,6 +96,13 @@ func Exec(path string, args []string) error {
 		return fmt.Errorf("plugin exec: %q is not a regular file", absPath)
 	}
 
+	// Verify the resolved binary has execute permission for the current process.
+	// This guards against exec-ing a file that is readable but not executable,
+	// and ensures the path has been fully validated before reaching syscall.Exec.
+	if err := syscall.Access(absPath, syscall.X_OK); err != nil {
+		return fmt.Errorf("plugin exec: %q is not executable: %w", absPath, err)
+	}
+
 	// Validate every argument: null bytes terminate C strings and can be used
 	// to smuggle unexpected content past Go-level checks.
 	for i, arg := range args {
