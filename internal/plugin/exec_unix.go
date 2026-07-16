@@ -76,6 +76,14 @@ func Exec(path string, args []string) error {
 	}
 	absPath = filepath.Clean(absPath)
 
+	// Resolve symlinks so that the directory-confinement check below operates
+	// on the real on-disk target, not a symlink that merely lives inside
+	// pluginDir but points elsewhere.
+	absPath, err = filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return fmt.Errorf("plugin exec: resolving symlinks for %q: %w", path, err)
+	}
+
 	// Restrict execution to the directory that holds the current binary so that
 	// only co-located, trusted plugin binaries can be exec'd.
 	selfPath, err := os.Executable()
